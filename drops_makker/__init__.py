@@ -1,4 +1,4 @@
 """drops-makker: kijkt Twitch-streams automatisch mee voor drops."""
 
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 NAAM = "drops-makker"

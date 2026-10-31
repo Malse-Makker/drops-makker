@@ -91,7 +91,9 @@ VOORTGANG_JS = """() => {
   return uit;
 }"""
 
-CLAIMKNOP = r"^\s*claim( now)?\s*$"
+# Ook in een paar andere talen, mocht Twitch die toch tonen.
+CLAIMKNOP = r"^\s*(claim( now)?|(nu )?claimen|(jetzt )?einfordern|réclamer)\s*$"
+WEIGERKNOP = r"^\s*(reject( all)?|(alles )?weigeren|(alle )?ablehnen|(tout )?refuser)\s*$"
 
 # Zelftest: neemt twee seconden H.264 op van een canvas en speelt dat af, zodat
 # echt decoderen getest wordt met dezelfde instellingen als bij het kijken.
@@ -446,7 +448,7 @@ class Kijker:
     async def schermen_wegklikken(self, page):
         # Cookiebanner: alleen het noodzakelijke.
         if await self._klik_als_er(page, '[data-a-target="consent-banner"] button',
-                                   re.compile(r"^\s*Reject\s*$", re.I)):
+                                   re.compile(WEIGERKNOP, re.I)):
             log("cookiebanner weggeklikt (Reject)")
         # Leeftijds- of inhoudswaarschuwing voor de speler.
         for sel in ('[data-a-target="content-classification-gate-overlay-start-watching-button"]',
@@ -465,9 +467,27 @@ class Kijker:
 
     async def kanaal_openen(self, login):
         await self.page.goto(f"https://www.twitch.tv/{login}", wait_until="domcontentloaded", timeout=60000)
-        await self.page.wait_for_selector("video", state="attached", timeout=45000)
+        # Wachten op de speler, en ondertussen wegklikken wat ervoor staat:
+        # sommige meldingen houden de speler tegen tot je ze wegklikt.
+        einde = time.monotonic() + 60
+        while not await self.page.locator("video").count():
+            if time.monotonic() > einde:
+                await self.pagina_vastleggen("geen-speler")
+                raise RuntimeError("Twitch toont geen videospeler; zie geen-speler.png en het logboek")
+            await self.schermen_wegklikken(self.page)
+            await self.page.wait_for_timeout(3000)
         await self.page.wait_for_timeout(3000)
         await self.schermen_wegklikken(self.page)
+
+    async def pagina_vastleggen(self, naam):
+        """Schermafdruk en tekst van de pagina, om te zien wat Twitch toont."""
+        try:
+            tekst = await self.page.evaluate("() => document.body ? document.body.innerText : ''")
+            log(f"pagina {self.page.url} ({await self.page.title()!r}): "
+                + " | ".join(r.strip() for r in tekst.splitlines() if r.strip())[:600])
+            await self.page.screenshot(path=str(self.inst.data / f"{naam}.png"))
+        except PWError as e:
+            log(f"pagina vastleggen lukte niet: {e.message.splitlines()[0]}")
 
     async def speler_staat(self):
         try:
