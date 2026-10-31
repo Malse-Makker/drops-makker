@@ -64,7 +64,7 @@ def main(config_pad=None, na_update=None):
         if staat != status["staat"]:
             icon.icon = icoon_maken(staat=staat)
         status.update(staat=staat, tekst=tekst)
-        icon.title = f"{NAAM}: {tekst}"[:127]
+        icon.title = f"{NAAM} {__version__}: {tekst}"[:127]
         icon.update_menu()
 
     def bureaublad(tekst):

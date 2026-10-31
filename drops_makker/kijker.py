@@ -12,6 +12,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.parse
@@ -168,6 +169,60 @@ def singletons_opruimen(profiel: Path):
             pass
 
 
+GEEN_VENSTER = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _achtergebleven_browser_stoppen(profiel: Path):
+    """Windows: stopt browserprocessen die nog met het profiel van drops-makker
+    draaien (na een crash of update). Alleen processen met precies dit profiel
+    in hun opdrachtregel, dus nooit je gewone Chrome of Edge."""
+    pad = str(profiel).replace("'", "''")
+    script = ("Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and "
+              "$_.CommandLine.Contains('" + pad + "') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                   capture_output=True, timeout=60, creationflags=GEEN_VENSTER)
+
+
+async def profiel_vrijmaken(profiel: Path, wachten=10):
+    """Wacht tot geen browser het profiel nog gebruikt. Op Windows houdt een
+    draaiende Chrome het bestand 'lockfile' open; een tweede Chrome op hetzelfde
+    profiel geeft het werk door aan de eerste en stopt meteen ("browser has been
+    closed"). Blijft het bezet, dan ruimt dit de achtergebleven browser op."""
+    if sys.platform != "win32":
+        return True
+    for poging in range(2):
+        einde = time.monotonic() + wachten
+        while True:
+            try:
+                (profiel / "lockfile").unlink()
+                return True
+            except FileNotFoundError:
+                return True
+            except PermissionError:
+                if time.monotonic() >= einde:
+                    break
+                await asyncio.sleep(0.5)
+        if poging == 0:
+            log("het browserprofiel is nog in gebruik: achtergebleven browser van drops-makker stoppen")
+            await asyncio.to_thread(_achtergebleven_browser_stoppen, profiel)
+    return False
+
+
+async def browser_netjes_sluiten(proc):
+    """Sluit een zelf gestarte browser: eerst netjes (dan schrijft hij zijn
+    cookies weg), en pas als dat niet lukt hard."""
+    if proc.poll() is not None:
+        return
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/PID", str(proc.pid)], capture_output=True, creationflags=GEEN_VENSTER)
+    else:
+        proc.terminate()
+    try:
+        await asyncio.to_thread(proc.wait, 15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
 def auth_cookie_in_profiel(profiel: Path) -> bool:
     """Of het profiel al een Twitch-login heeft. De naam van een cookie staat
     onversleuteld in de database, de waarde niet."""
@@ -311,6 +366,8 @@ class Kijker:
         exe = browser_zoeken(self.inst.browser)
         self.inst.profiel.mkdir(parents=True, exist_ok=True)
         singletons_opruimen(self.inst.profiel)
+        if not await profiel_vrijmaken(self.inst.profiel):
+            raise RuntimeError("het browserprofiel van drops-makker is nog in gebruik; herstart de computer als dit blijft")
         # Op een virtueel scherm (Docker) een gewone browser. Op een echte computer
         # zonder venster (headless), tenzij je hem wilt zien: een venster kan op
         # Windows de focus van je spel pakken.
@@ -614,10 +671,15 @@ class Kijker:
         log(f"{NAAM} {__version__} gestart; kanalen: {', '.join(self.inst.kanalen)}")
         token_ok = None  # None = nog niet gecheckt
         gebruiker, vorig_token, laatste_tokencheck, fouten = None, None, 0.0, 0
+        stil_na_fout = False  # na een weggevallen browser niet opnieuw "live" melden
         while not self._stoppen:
             if self._inloggen:
                 self._inloggen = False
-                await self.inloggen()
+                try:
+                    await self.inloggen()
+                except Exception as e:
+                    log(f"inloggen mislukt: {e}\n{traceback.format_exc()}")
+                    self.melden(f"⚠️ Inloggen bij Twitch lukte niet: {e}")
             self.instellingen_herladen()
             if self.inst.token != vorig_token:
                 gebruiker, vorig_token = None, self.inst.token
@@ -634,6 +696,7 @@ class Kijker:
                 self.account = gebruiker["login"] if gebruiker else None
                 if not gebruiker:
                     if token_ok is not False:
+                        log("geen token" if not self.inst.token else "Twitch accepteert het token niet (meer)")
                         self.melden(f"⚠️ Niet ingelogd bij Twitch: het token ontbreekt of werkt niet meer. {HOE_INLOGGEN}")
                     token_ok = False
                     self.status("niet-ingelogd", "Niet ingelogd bij Twitch")
@@ -660,8 +723,8 @@ class Kijker:
 
             try:
                 herstart, self._herstart = self._herstart, False
-                await self.kijken(gebruiker, *live, stil=herstart)
-                fouten = 0
+                await self.kijken(gebruiker, *live, stil=herstart or stil_na_fout)
+                fouten, stil_na_fout = 0, False
             except NietIngelogd:
                 self.melden("⚠️ De browser is niet ingelogd bij Twitch, hoewel het token geldig is. "
                             "Ik probeer het over een kwartier opnieuw.")
@@ -671,11 +734,19 @@ class Kijker:
                 if self._stoppen:
                     break
                 fouten += 1
-                log(f"fout tijdens kijken: {e}\n{traceback.format_exc()}")
+                tekst = str(e).lstrip(": ")
+                weg = "has been closed" in tekst or "crashed" in tekst.lower()
+                log(f"fout tijdens kijken: {tekst}\n{traceback.format_exc()}")
+                if weg and self.zichtbaar and not self.xvfb:
+                    # Het venster zelf dichtgedaan: dan verder zonder venster.
+                    self.zichtbaar = False
+                    log("browservenster gesloten: ik kijk verder zonder venster")
                 if fouten == 3:
-                    self.melden(f"⚠️ {NAAM} loopt steeds vast tijdens het kijken: {e}")
-                self.status("fout", f"Fout: {str(e)[:80]}", fout=str(e))
-                await self.pauze(min(60 * fouten, 600))
+                    self.melden(f"⚠️ {NAAM} loopt steeds vast tijdens het kijken: {tekst}")
+                self.status("fout", "De browser viel weg, ik start hem opnieuw" if weg else f"Fout: {tekst[:80]}",
+                            fout=tekst)
+                stil_na_fout = weg
+                await self.pauze(10 if weg and fouten < 3 else min(60 * fouten, 600))
 
     async def nieuwe_versie_melden(self):
         """Eén keer per dag kijken of er een nieuwe versie is, en die één keer melden."""
@@ -707,6 +778,7 @@ class Kijker:
         profiel = self.inst.profiel
         profiel.mkdir(parents=True, exist_ok=True)
         singletons_opruimen(profiel)
+        await profiel_vrijmaken(profiel)
         if auth_cookie_in_profiel(profiel):
             # Al ingelogd: eerst uitloggen, anders sluit het venster meteen
             # en kun je niet van account wisselen.
@@ -714,6 +786,7 @@ class Kijker:
             await ctx.clear_cookies()
             await ctx.close()
             singletons_opruimen(profiel)
+            await profiel_vrijmaken(profiel)
         welkom = self.inst.data / "inloggen.html"
         welkom.write_text(WELKOM_HTML, encoding="utf-8")
         self.status("inloggen", "Log in bij Twitch in het venster van drops-makker")
@@ -724,20 +797,20 @@ class Kijker:
                                  # Dezelfde opslag voor cookies als waarmee Playwright het profiel opent.
                                  "--password-store=basic", "--use-mock-keychain", "--lang=en-US",
                                  "--window-size=1000,800", welkom.as_uri()])
-        begin = time.monotonic()
+        begin, gezien = time.monotonic(), False
         while proc.poll() is None and time.monotonic() - begin < 900 and not self._stoppen:
             await asyncio.sleep(2)
             if auth_cookie_in_profiel(profiel):
+                gezien = True
                 await asyncio.sleep(3)  # Twitch zet na het inloggen nog meer cookies
                 break
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                await asyncio.to_thread(proc.wait, 15)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        log("ingelogd in het venster; het venster gaat dicht" if gezien
+            else "het inlogvenster is gesloten zonder dat er een Twitch-login is gezien")
+        await browser_netjes_sluiten(proc)
 
         singletons_opruimen(profiel)
+        if not await profiel_vrijmaken(profiel):
+            raise RuntimeError("het browserprofiel blijft in gebruik na het inloggen")
         ctx = await self.pw.chromium.launch_persistent_context(str(profiel), executable_path=exe, headless=True)
         try:
             cookies = await ctx.cookies("https://www.twitch.tv")
@@ -745,6 +818,8 @@ class Kijker:
             await ctx.close()
         token = next((c["value"] for c in cookies if c["name"] == "auth-token"), "")
         gebruiker = await asyncio.to_thread(twitch.gebruiker_bij_token, token) if token else None
+        log(f"Twitch-cookie in het profiel: {'ja' if token else 'nee'}; "
+            f"token geldig: {'ja, ' + gebruiker['login'] if gebruiker else 'nee'}")
         self.account = gebruiker["login"] if gebruiker else None
         if gebruiker:
             inst_mod.token_opslaan(self.inst.data, token, gebruiker["login"])
@@ -801,7 +876,29 @@ class Kijker:
             log(f"{NAAM} {__version__}; browser {exe} ({browser.version}); H.264: {'ja' if h264 else 'NEE'}")
         finally:
             await browser.close()
+        if sys.platform == "win32":
+            return bool(h264) and await self._profieltest(exe)
         return bool(h264)
+
+    async def _profieltest(self, exe):
+        """Windows: wordt een achtergebleven browser met ons profiel opgeruimd?"""
+        profiel = Path(tempfile.mkdtemp(prefix=f"{NAAM}-"))
+        proc = subprocess.Popen([exe, f"--user-data-dir={profiel}", "--no-first-run", "--no-default-browser-check",
+                                 "about:blank"])
+        try:
+            for _ in range(40):
+                await asyncio.sleep(0.5)
+                if (profiel / "lockfile").exists():
+                    break
+            bezet = (profiel / "lockfile").exists()
+            vrij = await profiel_vrijmaken(profiel, wachten=3)
+            log(f"achtergebleven browser: profiel bezet {'ja' if bezet else 'NEE'}, "
+                f"vrijgemaakt {'ja' if vrij else 'NEE'}")
+            return bezet and vrij
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            shutil.rmtree(profiel, ignore_errors=True)
 
     async def run(self, taak="kijken"):
         """taak: kijken, inloggen, test of zelftest. Geeft True als het gelukt is."""
