@@ -43,6 +43,9 @@ browser_verbergen = true
 poll_seconden = 60
 claim_minuten = 15
 herlaad_uren = 3
+# Updates: "auto" (de Windows-app werkt zichzelf bij als er geen stream loopt,
+# anders alleen een melding), "melden" (alleen een melding) of "uit".
+updates = "auto"
 """
 
 _KANAAL = re.compile(r"[a-z0-9_]{1,25}")
@@ -92,6 +95,7 @@ class Instellingen:
     poll: int = 60
     claim_minuten: int = 15
     herlaad_uren: int = 3
+    updates: str = "auto"
     data: Path = field(default_factory=data_map)
     config_pad: Path | None = None
 
@@ -137,6 +141,13 @@ def _opgeslagen_token(data: Path) -> tuple[str, float]:
         return "", 0.0
 
 
+def _updates(waarde):
+    waarde = str(waarde).strip().lower()
+    if waarde not in ("auto", "melden", "uit"):
+        raise ValueError(f"updates moet auto, melden of uit zijn, niet {waarde!r}")
+    return waarde
+
+
 def laden(config_pad: Path | None = None) -> Instellingen:
     pad = Path(config_pad) if config_pad else standaard_config()
     if pad.exists():
@@ -177,6 +188,7 @@ def laden(config_pad: Path | None = None) -> Instellingen:
         poll=int(env("POLL_SECONDS") or gev.get("poll_seconden", 60)),
         claim_minuten=int(env("CLAIM_MINUTES") or gev.get("claim_minuten", 15)),
         herlaad_uren=int(env("RELOAD_HOURS") or gev.get("herlaad_uren", 3)),
+        updates=_updates(env("UPDATES") or gev.get("updates", "auto")),
         data=data,
         config_pad=pad,
     )

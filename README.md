@@ -52,6 +52,15 @@ klik *Connect*. Voor War Thunder koppel je zo je Gaijin-account.
    - **Inloggen bij Twitch**: opnieuw inloggen, bijvoorbeeld met een ander
      account.
    - **Logboek openen**: zien wat hij doet.
+   - **Zoeken naar updates**: meteen kijken of er een nieuwe versie is.
+
+drops-makker werkt zichzelf bij. Een halve minuut na het opstarten, en daarna
+elke zes uur, kijkt hij of hier een nieuwe release staat. Zo ja, dan
+downloadt hij die, controleert de controlesom en herstart hij in de nieuwe
+versie. Dat doet hij nooit midden in een stream. Wil je dat niet, zet dan
+`updates = "melden"` (alleen een melding) of `"uit"` in de instellingen. Heb je
+versie 1.0.0, download dan één keer zelf de nieuwe versie; die kon zichzelf nog
+niet bijwerken.
 
 Instellingen staan in `%APPDATA%\drops-makker\instellingen.toml`, het
 browserprofiel en het logboek in `%LOCALAPPDATA%\drops-makker`.
@@ -81,8 +90,8 @@ docker exec drops-makker cat /data/status.json
 ```
 
 Na het wijzigen van `.env` is `docker compose up -d` nodig: een herstart leest
-`.env` niet opnieuw. Bijwerken naar een nieuwe versie:
-`git pull && docker compose up -d --build`.
+`.env` niet opnieuw. Is er een nieuwe versie, dan krijg je een melding;
+bijwerken gaat met `git pull && docker compose up -d --build`.
 
 ### Het token
 
@@ -147,6 +156,7 @@ In Docker gaat alles via `.env`:
 | `POLL_SECONDS` | 60 | hoe vaak checken of een kanaal live is |
 | `CLAIM_MINUTES` | 15 | hoe vaak de inventaris nalopen tijdens het kijken |
 | `RELOAD_HOURS` | 3 | pagina af en toe vers laden tegen geheugengroei |
+| `UPDATES` | `auto` | `melden` of `uit`: wel of geen melding bij een nieuwe versie |
 
 ## Goed om te weten
 

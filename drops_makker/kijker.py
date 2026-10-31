@@ -21,7 +21,7 @@ from pathlib import Path
 from playwright.async_api import Error as PWError
 from playwright.async_api import async_playwright
 
-from . import NAAM, __version__, twitch
+from . import NAAM, __version__, bijwerken, twitch
 from . import instellingen as inst_mod
 from .logboek import log
 from .meldingen import Melder
@@ -202,6 +202,11 @@ class Kijker:
         self.melden = Melder(lambda: self.inst, bureaublad)
         self.status_cb = status or (lambda tekst: None)
         self.status_tekst = "Opstarten"
+        self.staat = "opstarten"
+        # De tray-app werkt zelf bij; zonder tray meldt de kijker nieuwe versies.
+        self.updates_melden = True
+        self.inloggen_bij_start = False
+        self._update_check, self._update_gemeld = 0.0, None
         self.zichtbaar = not self.inst.browser_verbergen
         self.loop = self.pw = self.ctx = self.page = self.xvfb = None
         self.headless = False
@@ -246,7 +251,7 @@ class Kijker:
 
     def status(self, staat, tekst, **velden):
         # status.json is ook de hartslag voor de healthcheck in Docker.
-        self.status_tekst = tekst
+        self.status_tekst, self.staat = tekst, staat
         self.status_cb(tekst)
         velden.update(staat=staat, tekst=tekst, bijgewerkt=datetime.now().isoformat(timespec="seconds"))
         try:
@@ -600,6 +605,7 @@ class Kijker:
                         self.melden(f"✅ Ingelogd bij Twitch als {gebruiker['login']}.")
                 token_ok = True
 
+            await self.nieuwe_versie_melden()
             try:
                 live = await asyncio.to_thread(twitch.live_kanaal, self.inst.kanalen)
             except Exception as e:
@@ -629,6 +635,24 @@ class Kijker:
                     self.melden(f"⚠️ {NAAM} loopt steeds vast tijdens het kijken: {e}")
                 self.status("fout", f"Fout: {str(e)[:80]}", fout=str(e))
                 await self.pauze(min(60 * fouten, 600))
+
+    async def nieuwe_versie_melden(self):
+        """Eén keer per dag kijken of er een nieuwe versie is, en die één keer melden."""
+        if not self.updates_melden or self.inst.updates == "uit" \
+                or time.monotonic() - self._update_check < 86400 and self._update_check:
+            return
+        self._update_check = time.monotonic()
+        try:
+            versie, _, _ = await asyncio.to_thread(bijwerken.nieuwste)
+        except Exception as e:
+            log(f"zoeken naar een nieuwe versie mislukt: {e}")
+            return
+        if bijwerken.nieuwer(versie) and versie != self._update_gemeld:
+            self._update_gemeld = versie
+            hoe = ("Bijwerken: `git pull && docker compose up -d --build`." if os.environ.get("DATA_DIR")
+                   else "Bijwerken: `pipx upgrade drops-makker` of download de nieuwe versie.")
+            self.melden(f"ℹ️ Er is een nieuwe versie van {NAAM}: {versie} (je hebt {__version__}).\n"
+                        f"{bijwerken.RELEASES_URL}\n{hoe}")
 
     async def inloggen(self):
         """Opent een gewoon browservenster (zonder automatisering) op de inlogpagina
@@ -730,6 +754,8 @@ class Kijker:
         """taak: kijken, inloggen, test of zelftest. Geeft True als het gelukt is."""
         self.loop = asyncio.get_running_loop()
         self._wekker = asyncio.Event()
+        # Opnieuw te starten na een mislukte update; inloggen alleen bij de eerste start.
+        self._stoppen, self._inloggen, self.inloggen_bij_start = False, self.inloggen_bij_start, False
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 self.loop.add_signal_handler(sig, self.vraag_stop)
