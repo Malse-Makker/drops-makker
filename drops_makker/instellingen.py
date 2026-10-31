@@ -38,8 +38,8 @@ windows = true
 # auto, chrome, msedge, chromium, of het pad naar de browser tussen enkele
 # aanhalingstekens, bijvoorbeeld 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'.
 browser = "auto"
-# Browservenster verborgen houden (ook uit de taakbalk). Via het menu kun je
-# het tonen.
+# Kijken zonder browservenster, zodat er niets de focus van je spel kan pakken.
+# Op false (of via Browser tonen in het menu) zie je de browser wel.
 browser_verbergen = true
 poll_seconden = 60
 claim_minuten = 15

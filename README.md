@@ -53,12 +53,14 @@ klik *Connect*. Voor War Thunder koppel je zo je Gaijin-account.
    - paars met oranje stip: er gaat iets mis, kijk in het logboek
 
    Ga je met de muis op het icoon staan, dan zie je bijvoorbeeld "Kijkt naar
-   WarThunder_Esports (1u20m)". Klik je erop, dan zie je met welk account je
+   WarThunder_Esports (1u20m), BT-7M (USSR): 62% of 10 hours". Loopt dat
+   percentage op, dan telt het kijken mee. Klik je erop, dan zie je met welk account je
    ingelogd bent en heb je deze keuzes:
    - **Instellingen openen**: je kanalen en meldingen (zie hieronder).
    - **Start met Windows**: automatisch starten als je inlogt.
-   - **Browser tonen**: de browser waarin hij kijkt laten zien. Normaal is die
-     helemaal verborgen, ook in de taakbalk.
+   - **Browser tonen**: de browser waarin hij kijkt laten zien. Normaal kijkt
+     hij zonder venster, zodat hij nooit de focus van je spel pakt. Zet je de
+     browser aan, dan kan dat wel gebeuren.
    - **Ander Twitch-account**: uitloggen en met een ander account inloggen.
    - **Logboek openen**: zien wat hij doet.
    - **Zoeken naar updates**: meteen kijken of er een nieuwe versie is.

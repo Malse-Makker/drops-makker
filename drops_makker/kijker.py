@@ -12,7 +12,6 @@ import signal
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 import traceback
 import urllib.parse
@@ -22,7 +21,7 @@ from pathlib import Path
 from playwright.async_api import Error as PWError
 from playwright.async_api import async_playwright
 
-from . import NAAM, __version__, bijwerken, twitch, venster
+from . import NAAM, __version__, bijwerken, twitch
 from . import instellingen as inst_mod
 from .logboek import log
 from .meldingen import Melder
@@ -231,11 +230,11 @@ class Kijker:
         self.updates_melden = True
         self.inloggen_bij_start = False
         self.account = None  # Twitch-login zodra het token gecontroleerd is
-        self.hwnd = None  # het verborgen browservenster op Windows
+        self._herstart = False  # browser opnieuw starten (tonen of verbergen)
         self._update_check, self._update_gemeld = 0.0, None
         self.zichtbaar = not self.inst.browser_verbergen
         self.loop = self.pw = self.ctx = self.page = self.xvfb = None
-        self.headless = False
+        self.geen_scherm = False  # Linux zonder scherm en zonder Xvfb
         self._stoppen = self._inloggen = False
         self._wekker = None
         self._configfout = None
@@ -259,9 +258,14 @@ class Kijker:
         self._van_buiten(f)
 
     def wissel_venster(self):
+        """Browser tonen of verbergen. Kijkt hij al, dan start de browser opnieuw."""
         self.zichtbaar = not self.zichtbaar
-        if self.loop and not self.loop.is_closed():
-            asyncio.run_coroutine_threadsafe(self._venster_toepassen(), self.loop)
+
+        def f():
+            if self.ctx:
+                self._herstart = True
+                self._wekker.set()
+        self._van_buiten(f)
 
     # hulpjes
 
@@ -273,7 +277,7 @@ class Kijker:
         except asyncio.TimeoutError:
             pass
         self._wekker.clear()
-        return self._stoppen or self._inloggen
+        return self._stoppen or self._inloggen or self._herstart
 
     def status(self, staat, tekst, **velden):
         # status.json is ook de hartslag voor de healthcheck in Docker.
@@ -307,15 +311,15 @@ class Kijker:
         exe = browser_zoeken(self.inst.browser)
         self.inst.profiel.mkdir(parents=True, exist_ok=True)
         singletons_opruimen(self.inst.profiel)
-        verbergen = venster.kan_verbergen() and not self.headless and not self.xvfb
-        args = list(CHROME_ARGS)
-        if verbergen and not self.zichtbaar:
-            args.append("--window-position=-32000,-32000")  # buiten beeld tot hij verborgen is
+        # Op een virtueel scherm (Docker) een gewone browser. Op een echte computer
+        # zonder venster (headless), tenzij je hem wilt zien: een venster kan op
+        # Windows de focus van je spel pakken.
+        headless = self.geen_scherm or (not self.xvfb and not self.zichtbaar)
         ctx = await self.pw.chromium.launch_persistent_context(
             str(self.inst.profiel),
             executable_path=exe,
-            headless=self.headless,
-            args=args,
+            headless=headless,
+            args=CHROME_ARGS,
             viewport={"width": 1280, "height": 720},
             locale="en-US",  # knopteksten als "Claim Now" en "Reject" zijn dan voorspelbaar
         )
@@ -333,46 +337,7 @@ class Kijker:
         await ctx.add_init_script(INIT_SCRIPT)
         self.ctx = ctx
         self.page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        self.hwnd = None
-        if verbergen:
-            await self._venster_zoeken()
-            await self._venster_toepassen()
         return ctx
-
-    async def _venster_zoeken(self):
-        """Zoekt het browservenster op Windows aan een unieke paginatitel."""
-        merk = f"{NAAM}-{os.getpid()}-{time.monotonic_ns()}"
-        try:
-            await self.page.goto(f"data:text/html,<title>{merk}</title>")
-            for _ in range(20):
-                self.hwnd = await asyncio.to_thread(venster.zoeken, merk)
-                if self.hwnd:
-                    return
-                await asyncio.sleep(0.25)
-        except PWError:
-            pass
-        log("browservenster niet gevonden: het wordt geminimaliseerd in plaats van verborgen")
-
-    async def _venster_toepassen(self):
-        """Browservenster verbergen of tonen. Niet op een virtueel scherm."""
-        if not self.page or self.xvfb or self.headless:
-            return
-        try:
-            cdp = await self.ctx.new_cdp_session(self.page)
-            w = (await cdp.send("Browser.getWindowForTarget"))["windowId"]
-            if self.hwnd and self.zichtbaar:
-                # Terug in beeld halen: hij is buiten beeld gestart.
-                await cdp.send("Browser.setWindowBounds", {"windowId": w, "bounds": {
-                    "windowState": "normal", "left": 80, "top": 60, "width": 1280, "height": 800}})
-                venster.tonen(self.hwnd)
-            elif self.hwnd:
-                venster.verbergen(self.hwnd)
-            else:
-                await cdp.send("Browser.setWindowBounds", {"windowId": w, "bounds": {
-                    "windowState": "normal" if self.zichtbaar else "minimized"}})
-            await cdp.detach()
-        except PWError as e:
-            log(f"venster {'tonen' if self.zichtbaar else 'verbergen'} lukte niet: {e.message.splitlines()[0]}")
 
     async def _klik_als_er(self, page, selector, naam=None, timeout=3000):
         loc = page.locator(selector)
@@ -532,9 +497,11 @@ class Kijker:
 
     # de lussen
 
-    async def kijken(self, gebruiker, login, naam, titel, game):
-        """Kijkt tot het kanaal offline gaat of een hoger kanaal live komt."""
-        self.melden(f"🔴 **{naam}** is live ({game}): {titel}\nIk kijk mee.")
+    async def kijken(self, gebruiker, login, naam, titel, game, stil=False):
+        """Kijkt tot het kanaal offline gaat of een hoger kanaal live komt.
+        stil: na een herstart van de browser niet opnieuw melden dat hij live is."""
+        if not stil:
+            self.melden(f"🔴 **{naam}** is live ({game}): {titel}\nIk kijk mee.")
         begin = time.monotonic()
         await self.browser_starten(gebruiker)
         reden, voortgang, claim_gemeld = "offline", [], set()
@@ -553,7 +520,6 @@ class Kijker:
             await self.kanaal_openen(login)
             if not await self.ingelogd(self.page):
                 raise NietIngelogd()
-            await self._venster_toepassen()
             log(f"kijkt naar {login} als {gebruiker['login']}")
 
             nu = time.monotonic()
@@ -618,10 +584,12 @@ class Kijker:
                         log("voortgang: " + " | ".join(voortgang))
 
                 minuten = int((nu - begin) // 60)
-                self.status("kijken", f"Kijkt naar {naam} ({duur(nu - begin)})", kanaal=login, titel=titel,
-                            minuten=minuten, speler=st, voortgang=voortgang)
+                # Met de voortgang erbij zie je in de tooltip dat het meetelt.
+                tekst = f"Kijkt naar {naam} ({duur(nu - begin)})" + (f", {voortgang[0]}" if voortgang else "")
+                self.status("kijken", tekst, kanaal=login, titel=titel, minuten=minuten, speler=st,
+                            voortgang=voortgang)
 
-            if not self._stoppen:
+            if not self._stoppen and not self._herstart:
                 # Willekeurige drops vallen soms vlak voor het einde.
                 opgehaald, niet_gelukt, voortgang = await self.drops_ophalen()
                 claims_melden(opgehaald, niet_gelukt)
@@ -632,6 +600,8 @@ class Kijker:
             except PWError:
                 pass
 
+        if self._herstart:
+            return
         if self._inloggen:
             reden = "opnieuw inloggen"
         if not self._stoppen:
@@ -689,7 +659,8 @@ class Kijker:
                 continue
 
             try:
-                await self.kijken(gebruiker, *live)
+                herstart, self._herstart = self._herstart, False
+                await self.kijken(gebruiker, *live, stil=herstart)
                 fouten = 0
             except NietIngelogd:
                 self.melden("⚠️ De browser is niet ingelogd bij Twitch, hoewel het token geldig is. "
@@ -728,7 +699,7 @@ class Kijker:
         """Opent een gewoon browservenster (zonder automatisering) op de inlogpagina
         van Twitch, met het profiel van drops-makker. Na het inloggen leest
         drops-makker het token uit dat profiel."""
-        if self.headless or self.xvfb:
+        if self.geen_scherm or self.xvfb:
             self.melden("⚠️ Inloggen via een browservenster kan alleen op een computer met scherm. "
                         "Gebruik op een server het token (zie de README).")
             return None
@@ -830,33 +801,7 @@ class Kijker:
             log(f"{NAAM} {__version__}; browser {exe} ({browser.version}); H.264: {'ja' if h264 else 'NEE'}")
         finally:
             await browser.close()
-        if venster.kan_verbergen():
-            return bool(h264) and await self._venstertest(exe)
         return bool(h264)
-
-    async def _venstertest(self, exe):
-        """Windows: kan het browservenster verborgen en weer getoond worden?"""
-        profiel = tempfile.mkdtemp(prefix=f"{NAAM}-")
-        self.ctx = await self.pw.chromium.launch_persistent_context(
-            profiel, executable_path=exe, headless=False, args=CHROME_ARGS + ["--window-position=-32000,-32000"])
-        self.page = self.ctx.pages[0]
-        try:
-            await self._venster_zoeken()
-            verborgen = getoond = False
-            if self.hwnd:
-                self.zichtbaar = False
-                await self._venster_toepassen()
-                verborgen = not venster.zichtbaar(self.hwnd)
-                self.zichtbaar = True
-                await self._venster_toepassen()
-                getoond = venster.zichtbaar(self.hwnd)
-            log(f"venster gevonden: {'ja' if self.hwnd else 'NEE'}, verbergen: {'ja' if verborgen else 'NEE'}, "
-                f"tonen: {'ja' if getoond else 'NEE'}")
-            return verborgen and getoond
-        finally:
-            await self.ctx.close()
-            self.ctx = self.page = self.hwnd = None
-            shutil.rmtree(profiel, ignore_errors=True)
 
     async def run(self, taak="kijken"):
         """taak: kijken, inloggen, test of zelftest. Geeft True als het gelukt is."""
@@ -871,7 +816,7 @@ class Kijker:
                 pass  # Windows, of niet in de hoofdthread
         if taak != "zelftest":
             self.xvfb = xvfb_starten()
-            self.headless = sys.platform == "linux" and not os.environ.get("DISPLAY") \
+            self.geen_scherm = sys.platform == "linux" and not os.environ.get("DISPLAY") \
                 and not os.environ.get("WAYLAND_DISPLAY")
         try:
             async with async_playwright() as pw:
