@@ -57,11 +57,13 @@ def main(config_pad=None, na_update=None):
     config_pad = Path(config_pad) if config_pad else inst_mod.standaard_config()
     eerste_keer = inst_mod.voorbeeld_schrijven(config_pad)
 
-    icon = pystray.Icon(NAAM, icoon_maken(), NAAM)
-    status = {"tekst": "Opstarten"}
+    icon = pystray.Icon(NAAM, icoon_maken(staat="opstarten"), NAAM)
+    status = {"tekst": "Opstarten", "staat": "opstarten"}
 
-    def status_bijwerken(tekst):
-        status["tekst"] = tekst
+    def status_bijwerken(staat, tekst):
+        if staat != status["staat"]:
+            icon.icon = icoon_maken(staat=staat)
+        status.update(staat=staat, tekst=tekst)
         icon.title = f"{NAAM}: {tekst}"[:127]
         icon.update_menu()
 
@@ -76,7 +78,7 @@ def main(config_pad=None, na_update=None):
             asyncio.run(kijker.run())
         except Exception as e:
             log(f"de kijker is gestopt door een fout: {e}")
-            status_bijwerken(f"Gestopt door een fout: {str(e)[:60]}")
+            status_bijwerken("fout", f"Gestopt door een fout: {str(e)[:60]}")
 
     threads = {"kijker": threading.Thread(target=draaien, daemon=True)}
     gestopt = threading.Event()
@@ -159,8 +161,11 @@ def main(config_pad=None, na_update=None):
 
     icon.menu = pystray.Menu(
         pystray.MenuItem(lambda item: status["tekst"], None, enabled=False),
+        pystray.MenuItem(lambda item: f"Ingelogd als {kijker.account}" if kijker.account else "Niet ingelogd",
+                         None, enabled=False),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem("Inloggen bij Twitch…", kijker.vraag_inloggen),
+        pystray.MenuItem(lambda item: "Ander Twitch-account…" if kijker.account else "Inloggen bij Twitch…",
+                         kijker.vraag_inloggen),
         pystray.MenuItem("Browser tonen", kijker.wissel_venster, checked=lambda item: kijker.zichtbaar),
         pystray.MenuItem("Instellingen openen", lambda: openen(config_pad)),
         pystray.MenuItem("Logboek openen", lambda: openen(kijker.inst.log_pad)),

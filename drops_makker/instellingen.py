@@ -38,7 +38,8 @@ windows = true
 # auto, chrome, msedge, chromium, of het pad naar de browser tussen enkele
 # aanhalingstekens, bijvoorbeeld 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'.
 browser = "auto"
-# Browservenster geminimaliseerd houden. Via het menu kun je het tonen.
+# Browservenster verborgen houden (ook uit de taakbalk). Via het menu kun je
+# het tonen.
 browser_verbergen = true
 poll_seconden = 60
 claim_minuten = 15

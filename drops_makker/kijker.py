@@ -12,6 +12,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.parse
@@ -21,7 +22,7 @@ from pathlib import Path
 from playwright.async_api import Error as PWError
 from playwright.async_api import async_playwright
 
-from . import NAAM, __version__, bijwerken, twitch
+from . import NAAM, __version__, bijwerken, twitch, venster
 from . import instellingen as inst_mod
 from .logboek import log
 from .meldingen import Melder
@@ -84,6 +85,29 @@ VOORTGANG_JS = """() => {
 }"""
 
 CLAIMKNOP = r"^\s*claim( now)?\s*$"
+
+# Eerste pagina van het inlogvenster: maakt duidelijk dat dit niet je eigen
+# Chrome of Edge is.
+WELKOM_HTML = """<!doctype html>
+<meta charset="utf-8">
+<title>drops-makker: inloggen bij Twitch</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #18181b; color: #efeff1; margin: 0;
+         min-height: 100vh; display: grid; place-items: center; }
+  main { max-width: 32rem; padding: 2rem; text-align: center; line-height: 1.5; }
+  h1 { color: #bf94ff; }
+  a { display: inline-block; margin-top: 1rem; padding: .8rem 1.6rem; background: #9146ff; color: #fff;
+      border-radius: .4rem; text-decoration: none; font-weight: 600; }
+</style>
+<main>
+  <h1>drops-makker</h1>
+  <p>Dit is het browservenster van drops-makker, los van je eigen browser.
+     Je bladwijzers en opgeslagen wachtwoorden zitten hier niet in.</p>
+  <p>Log in bij Twitch met het account waarmee je drops wilt verzamelen.
+     Zodra je bent ingelogd, sluit dit venster vanzelf.</p>
+  <a href="https://www.twitch.tv/login">Inloggen bij Twitch</a>
+</main>
+"""
 
 
 class NietIngelogd(Exception):
@@ -200,12 +224,14 @@ class Kijker:
         self.config_pad = config_pad
         self.inst = inst_mod.laden(config_pad)
         self.melden = Melder(lambda: self.inst, bureaublad)
-        self.status_cb = status or (lambda tekst: None)
+        self.status_cb = status or (lambda staat, tekst: None)
         self.status_tekst = "Opstarten"
         self.staat = "opstarten"
         # De tray-app werkt zelf bij; zonder tray meldt de kijker nieuwe versies.
         self.updates_melden = True
         self.inloggen_bij_start = False
+        self.account = None  # Twitch-login zodra het token gecontroleerd is
+        self.hwnd = None  # het verborgen browservenster op Windows
         self._update_check, self._update_gemeld = 0.0, None
         self.zichtbaar = not self.inst.browser_verbergen
         self.loop = self.pw = self.ctx = self.page = self.xvfb = None
@@ -252,7 +278,7 @@ class Kijker:
     def status(self, staat, tekst, **velden):
         # status.json is ook de hartslag voor de healthcheck in Docker.
         self.status_tekst, self.staat = tekst, staat
-        self.status_cb(tekst)
+        self.status_cb(staat, tekst)
         velden.update(staat=staat, tekst=tekst, bijgewerkt=datetime.now().isoformat(timespec="seconds"))
         try:
             self.inst.data.mkdir(parents=True, exist_ok=True)
@@ -281,11 +307,15 @@ class Kijker:
         exe = browser_zoeken(self.inst.browser)
         self.inst.profiel.mkdir(parents=True, exist_ok=True)
         singletons_opruimen(self.inst.profiel)
+        verbergen = venster.kan_verbergen() and not self.headless and not self.xvfb
+        args = list(CHROME_ARGS)
+        if verbergen and not self.zichtbaar:
+            args.append("--window-position=-32000,-32000")  # buiten beeld tot hij verborgen is
         ctx = await self.pw.chromium.launch_persistent_context(
             str(self.inst.profiel),
             executable_path=exe,
             headless=self.headless,
-            args=CHROME_ARGS,
+            args=args,
             viewport={"width": 1280, "height": 720},
             locale="en-US",  # knopteksten als "Claim Now" en "Reject" zijn dan voorspelbaar
         )
@@ -303,19 +333,43 @@ class Kijker:
         await ctx.add_init_script(INIT_SCRIPT)
         self.ctx = ctx
         self.page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        self.hwnd = None
+        if verbergen:
+            await self._venster_zoeken()
+            await self._venster_toepassen()
         return ctx
 
+    async def _venster_zoeken(self):
+        """Zoekt het browservenster op Windows aan een unieke paginatitel."""
+        merk = f"{NAAM}-{os.getpid()}-{time.monotonic_ns()}"
+        try:
+            await self.page.goto(f"data:text/html,<title>{merk}</title>")
+            for _ in range(20):
+                self.hwnd = await asyncio.to_thread(venster.zoeken, merk)
+                if self.hwnd:
+                    return
+                await asyncio.sleep(0.25)
+        except PWError:
+            pass
+        log("browservenster niet gevonden: het wordt geminimaliseerd in plaats van verborgen")
+
     async def _venster_toepassen(self):
-        """Browservenster minimaliseren of tonen. Niet op een virtueel scherm."""
+        """Browservenster verbergen of tonen. Niet op een virtueel scherm."""
         if not self.page or self.xvfb or self.headless:
             return
         try:
             cdp = await self.ctx.new_cdp_session(self.page)
-            venster = await cdp.send("Browser.getWindowForTarget")
-            await cdp.send("Browser.setWindowBounds", {
-                "windowId": venster["windowId"],
-                "bounds": {"windowState": "normal" if self.zichtbaar else "minimized"},
-            })
+            w = (await cdp.send("Browser.getWindowForTarget"))["windowId"]
+            if self.hwnd and self.zichtbaar:
+                # Terug in beeld halen: hij is buiten beeld gestart.
+                await cdp.send("Browser.setWindowBounds", {"windowId": w, "bounds": {
+                    "windowState": "normal", "left": 80, "top": 60, "width": 1280, "height": 800}})
+                venster.tonen(self.hwnd)
+            elif self.hwnd:
+                venster.verbergen(self.hwnd)
+            else:
+                await cdp.send("Browser.setWindowBounds", {"windowId": w, "bounds": {
+                    "windowState": "normal" if self.zichtbaar else "minimized"}})
             await cdp.detach()
         except PWError as e:
             log(f"venster {'tonen' if self.zichtbaar else 'verbergen'} lukte niet: {e.message.splitlines()[0]}")
@@ -427,6 +481,14 @@ class Kijker:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
         return page
 
+    @staticmethod
+    async def _knop_weg(page, knoppen, n, seconden=15):
+        for _ in range(seconden):
+            await page.wait_for_timeout(1000)
+            if await knoppen.count() < n:
+                return True
+        return False
+
     async def drops_ophalen(self):
         """Opent de inventaris in een tabblad op de achtergrond en klikt alle
         claimknoppen. Geeft (opgehaald, niet_gelukt, voortgang)."""
@@ -444,15 +506,22 @@ class Kijker:
                     break
                 knop = knoppen.first
                 naam = await knop.evaluate(DROPNAAM_JS)
-                try:
-                    await knop.click(timeout=10000, force=True)
-                    await page.wait_for_timeout(4000)
-                    if await knoppen.count() >= n:
-                        await knop.evaluate("b => b.click()")  # vangnet voor een tabblad op de achtergrond
-                        await page.wait_for_timeout(4000)
-                except PWError:
-                    pass
-                if await knoppen.count() >= n:
+                gelukt = False
+                # Eerst een gewone klik, dan een klik via JavaScript als vangnet
+                # voor een tabblad op de achtergrond.
+                for klik in (lambda: knop.click(timeout=10000, force=True), lambda: knop.evaluate("b => b.click()")):
+                    try:
+                        await klik()
+                    except PWError:
+                        continue
+                    if gelukt := await self._knop_weg(page, knoppen, n):
+                        break
+                if not gelukt:
+                    # Twitch werkt de lijst soms pas later bij: vers laden en opnieuw tellen.
+                    await page.reload(wait_until="domcontentloaded", timeout=60000)
+                    await page.wait_for_timeout(8000)
+                    gelukt = await knoppen.count() < n
+                if not gelukt:
                     niet_gelukt.append(naam)
                     break
                 opgehaald.append(naam)
@@ -592,6 +661,7 @@ class Kijker:
                     await self.pauze(self.inst.poll)
                     continue
                 laatste_tokencheck = time.monotonic()
+                self.account = gebruiker["login"] if gebruiker else None
                 if not gebruiker:
                     if token_ok is not False:
                         self.melden(f"⚠️ Niet ingelogd bij Twitch: het token ontbreekt of werkt niet meer. {HOE_INLOGGEN}")
@@ -666,12 +736,23 @@ class Kijker:
         profiel = self.inst.profiel
         profiel.mkdir(parents=True, exist_ok=True)
         singletons_opruimen(profiel)
-        self.status("inloggen", "Log in bij Twitch in het browservenster")
+        if auth_cookie_in_profiel(profiel):
+            # Al ingelogd: eerst uitloggen, anders sluit het venster meteen
+            # en kun je niet van account wisselen.
+            ctx = await self.pw.chromium.launch_persistent_context(str(profiel), executable_path=exe, headless=True)
+            await ctx.clear_cookies()
+            await ctx.close()
+            singletons_opruimen(profiel)
+        welkom = self.inst.data / "inloggen.html"
+        welkom.write_text(WELKOM_HTML, encoding="utf-8")
+        self.status("inloggen", "Log in bij Twitch in het venster van drops-makker")
         log("log in bij Twitch in het browservenster dat nu opent")
+        if self.melden.bureaublad:
+            self.melden.bureaublad("Log in bij Twitch in het venster van drops-makker dat nu opent.")
         proc = subprocess.Popen([exe, f"--user-data-dir={profiel}", "--no-first-run", "--no-default-browser-check",
                                  # Dezelfde opslag voor cookies als waarmee Playwright het profiel opent.
                                  "--password-store=basic", "--use-mock-keychain", "--lang=en-US",
-                                 "https://www.twitch.tv/login"])
+                                 "--window-size=1000,800", welkom.as_uri()])
         begin = time.monotonic()
         while proc.poll() is None and time.monotonic() - begin < 900 and not self._stoppen:
             await asyncio.sleep(2)
@@ -693,6 +774,7 @@ class Kijker:
             await ctx.close()
         token = next((c["value"] for c in cookies if c["name"] == "auth-token"), "")
         gebruiker = await asyncio.to_thread(twitch.gebruiker_bij_token, token) if token else None
+        self.account = gebruiker["login"] if gebruiker else None
         if gebruiker:
             inst_mod.token_opslaan(self.inst.data, token, gebruiker["login"])
             self.instellingen_herladen()
@@ -748,7 +830,33 @@ class Kijker:
             log(f"{NAAM} {__version__}; browser {exe} ({browser.version}); H.264: {'ja' if h264 else 'NEE'}")
         finally:
             await browser.close()
+        if venster.kan_verbergen():
+            return bool(h264) and await self._venstertest(exe)
         return bool(h264)
+
+    async def _venstertest(self, exe):
+        """Windows: kan het browservenster verborgen en weer getoond worden?"""
+        profiel = tempfile.mkdtemp(prefix=f"{NAAM}-")
+        self.ctx = await self.pw.chromium.launch_persistent_context(
+            profiel, executable_path=exe, headless=False, args=CHROME_ARGS + ["--window-position=-32000,-32000"])
+        self.page = self.ctx.pages[0]
+        try:
+            await self._venster_zoeken()
+            verborgen = getoond = False
+            if self.hwnd:
+                self.zichtbaar = False
+                await self._venster_toepassen()
+                verborgen = not venster.zichtbaar(self.hwnd)
+                self.zichtbaar = True
+                await self._venster_toepassen()
+                getoond = venster.zichtbaar(self.hwnd)
+            log(f"venster gevonden: {'ja' if self.hwnd else 'NEE'}, verbergen: {'ja' if verborgen else 'NEE'}, "
+                f"tonen: {'ja' if getoond else 'NEE'}")
+            return verborgen and getoond
+        finally:
+            await self.ctx.close()
+            self.ctx = self.page = self.hwnd = None
+            shutil.rmtree(profiel, ignore_errors=True)
 
     async def run(self, taak="kijken"):
         """taak: kijken, inloggen, test of zelftest. Geeft True als het gelukt is."""

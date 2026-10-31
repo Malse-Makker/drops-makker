@@ -41,16 +41,25 @@ klik *Connect*. Voor War Thunder koppel je zo je Gaijin-account.
    Je hebt Google Chrome of Microsoft Edge nodig. Edge zit standaard in Windows.
 2. Start het. Windows waarschuwt misschien ("Windows heeft uw pc beschermd"),
    omdat de app niet ondertekend is: kies *Meer info* → *Toch uitvoeren*.
-3. Er opent een browservenster: log daar in bij Twitch. Zodra je bent
-   ingelogd, sluit het venster vanzelf.
-4. drops-makker staat nu als paars icoon in het systeemvak (rechtsonder, soms
-   onder het pijltje). Via dat icoon:
+3. Er opent een apart venster van drops-makker (los van je eigen Chrome of
+   Edge, dus zonder je bladwijzers). Klik op *Inloggen bij Twitch* en log in
+   met het account waarmee je drops wilt verzamelen. Zodra je bent ingelogd,
+   sluit het venster vanzelf.
+4. drops-makker staat nu als icoon in het systeemvak (rechtsonder, soms onder
+   het pijltje). Aan de stip zie je wat hij doet:
+   - grijs: nog niet ingelogd (oranje stip: log opnieuw in)
+   - paars met groene stip: ingelogd, wacht tot een kanaal live gaat
+   - paars met rode stip: kijkt nu mee
+   - paars met oranje stip: er gaat iets mis, kijk in het logboek
+
+   Ga je met de muis op het icoon staan, dan zie je bijvoorbeeld "Kijkt naar
+   WarThunder_Esports (1u20m)". Klik je erop, dan zie je met welk account je
+   ingelogd bent en heb je deze keuzes:
    - **Instellingen openen**: je kanalen en meldingen (zie hieronder).
    - **Start met Windows**: automatisch starten als je inlogt.
-   - **Browser tonen**: het browservenster laten zien. Standaard staat het
-     geminimaliseerd.
-   - **Inloggen bij Twitch**: opnieuw inloggen, bijvoorbeeld met een ander
-     account.
+   - **Browser tonen**: de browser waarin hij kijkt laten zien. Normaal is die
+     helemaal verborgen, ook in de taakbalk.
+   - **Ander Twitch-account**: uitloggen en met een ander account inloggen.
    - **Logboek openen**: zien wat hij doet.
    - **Zoeken naar updates**: meteen kijken of er een nieuwe versie is.
 
