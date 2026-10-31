@@ -51,13 +51,20 @@ CHROME_ARGS = [
     "--no-default-browser-check",
     "--lang=en-US",
     "--window-size=1280,800",
+    # Video decoderen zonder de videokaart. Hardwaredecodering geeft op sommige
+    # Windows-pc's Twitch-fout #3000; bij 160p kost decoderen op de cpu niets.
+    "--disable-accelerated-video-decode",
 ]
 
 SPELER_JS = """() => {
   const v = document.querySelector('[data-a-target="video-player"] video') || document.querySelector('video');
   if (!v) return null;
+  // Foutmelding van de Twitch-speler, zoals "Error #3000" bij een decodeerfout.
+  const speler = document.querySelector('[data-a-target="video-player"]');
+  const fout = speler && speler.innerText.match(/Error #(\\d+)/);
   return {paused: v.paused, muted: v.muted, volume: Math.round(v.volume * 100) / 100,
-          time: Math.round(v.currentTime), height: v.videoHeight, ready: v.readyState};
+          time: Math.round(v.currentTime), height: v.videoHeight, ready: v.readyState,
+          fout: fout ? fout[1] : (v.error ? `media ${v.error.code}` : null)};
 }"""
 
 # Naam van de drop bij een claimknop: de tekst van het eerste omliggende blok
@@ -85,6 +92,34 @@ VOORTGANG_JS = """() => {
 }"""
 
 CLAIMKNOP = r"^\s*claim( now)?\s*$"
+
+# Zelftest: neemt twee seconden H.264 op van een canvas en speelt dat af, zodat
+# echt decoderen getest wordt met dezelfde instellingen als bij het kijken.
+AFSPEELTEST_JS = """async () => {
+  const soort = ['video/mp4;codecs=avc1.42E01E', 'video/mp4;codecs=avc1', 'video/mp4']
+    .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+  if (!soort) return {overgeslagen: 'deze browser kan geen mp4 opnemen'};
+  const c = document.createElement('canvas');
+  c.width = 320; c.height = 180;
+  const g = c.getContext('2d');
+  let f = 0;
+  const klok = setInterval(() => { g.fillStyle = `hsl(${(f++ * 12) % 360},80%,50%)`; g.fillRect(0, 0, 320, 180); }, 33);
+  const opname = new MediaRecorder(c.captureStream(30), {mimeType: soort});
+  const delen = [];
+  opname.ondataavailable = e => delen.push(e.data);
+  const klaar = new Promise(r => opname.onstop = r);
+  opname.start();
+  await new Promise(r => setTimeout(r, 2000));
+  opname.stop();
+  await klaar;
+  clearInterval(klok);
+  const v = document.createElement('video');
+  v.src = URL.createObjectURL(new Blob(delen, {type: soort}));
+  document.body.appendChild(v);
+  try { await v.play(); } catch (e) { return {speelt: false, fout: String(e)}; }
+  await new Promise(r => setTimeout(r, 1500));
+  return {speelt: v.currentTime > 0.5 && !v.error, breedte: v.videoWidth, fout: v.error ? v.error.code : null};
+}"""
 
 # Eerste pagina van het inlogvenster: maakt duidelijk dat dit niet je eigen
 # Chrome of Edge is.
@@ -583,6 +618,7 @@ class Kijker:
             laatste_claim = nu - self.inst.claim_minuten * 60 + 120  # eerste ronde na twee minuten
             laatste_check = laatste_herlaad = nu
             kwaliteit_gecheckt, vorige_tijd, stil = False, None, 0
+            spelerfouten = 0  # fouten van de speler op rij
 
             while not await self.pauze(30):
                 nu = time.monotonic()
@@ -613,19 +649,29 @@ class Kijker:
                 if st is None:
                     log("geen videospeler op de pagina")
                     herladen = True
+                elif st["fout"]:
+                    spelerfouten += 1
+                    log(f"de Twitch-speler geeft fout #{st['fout']}: pagina opnieuw laden")
+                    if spelerfouten == 3:
+                        self.melden(f"⚠️ De Twitch-speler blijft fout #{st['fout']} geven. Ik blijf het opnieuw "
+                                    "proberen; kijk anders in het logboek.")
+                    herladen = True
                 else:
                     herladen |= await self.speler_bijsturen(st)
                     if not kwaliteit_gecheckt and st["height"]:
                         kwaliteit_gecheckt = True
                         if st["height"] > 400:
                             await self.laagste_kwaliteit()
-                    if not st["paused"] and st["time"] == vorige_tijd:
+                    # Ook op pauze telt als stilstand: de speler zou moeten spelen.
+                    if st["time"] == vorige_tijd:
                         stil += 1
                         if stil >= 2:
                             log("beeld staat al een minuut stil")
                             herladen = True
                     else:
                         stil = 0
+                        if st["time"] > (vorige_tijd or 0) + 20:
+                            spelerfouten = 0  # speelt weer gewoon
                     vorige_tijd = st["time"]
 
                 if herladen:
@@ -869,11 +915,15 @@ class Kijker:
     async def zelftest(self):
         """Kan de browser starten en H.264 afspelen? Raakt Twitch niet aan."""
         exe = browser_zoeken(self.inst.browser)
-        browser = await self.pw.chromium.launch(executable_path=exe, headless=True)
+        browser = await self.pw.chromium.launch(executable_path=exe, headless=True, args=CHROME_ARGS)
         try:
             page = await browser.new_page()
             h264 = await page.evaluate("() => MediaSource.isTypeSupported('video/mp4; codecs=\"avc1.4D401F\"')")
             log(f"{NAAM} {__version__}; browser {exe} ({browser.version}); H.264: {'ja' if h264 else 'NEE'}")
+            afspelen = await page.evaluate(AFSPEELTEST_JS)
+            log(f"H.264 afspelen: {afspelen}")
+            if "overgeslagen" not in afspelen:
+                h264 = h264 and afspelen.get("speelt")
         finally:
             await browser.close()
         if sys.platform == "win32":
