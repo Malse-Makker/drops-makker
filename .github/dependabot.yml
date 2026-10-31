@@ -1,0 +1,33 @@
+# Dependabot opent elke maandag PR's voor nieuwe versies van de afhankelijkheden.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directories: ["/", "/packaging"]
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Amsterdam
+    open-pull-requests-limit: 5
+    groups:
+      # Kleine updates samen in één PR; major-updates (kunnen breken) apart.
+      python-minor-en-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Amsterdam
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Amsterdam
+    open-pull-requests-limit: 5

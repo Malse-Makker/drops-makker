@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drops-makker"
+description = "Kijkt Twitch-streams automatisch mee voor drops"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["playwright==1.64.1"]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+# Icoon in het systeemvak (Windows).
+tray = ["pystray==0.19.5", "pillow==13.0.0"]
+
+[project.scripts]
+drops-makker = "drops_makker.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Malse-Makker/drops-makker"
+
+[tool.setuptools]
+packages = ["drops_makker"]
+
+[tool.setuptools.dynamic]
+version = { attr = "drops_makker.__version__" }

@@ -1,0 +1,24 @@
+services:
+  drops-makker:
+    build: .
+    container_name: drops-makker
+    restart: unless-stopped
+    init: true
+    # Vaste hostnaam: Chrome koppelt zijn profiel aan de hostnaam.
+    hostname: drops-makker
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Europe/Amsterdam}
+    shm_size: 1gb
+    mem_limit: 2g
+    stop_grace_period: 30s
+    volumes:
+      - data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  data:

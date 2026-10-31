@@ -1,0 +1,80 @@
+name: test en bouwen
+
+# Bij elke duw: tests, de Docker-image (amd64 en arm64) en de Windows-app.
+# Bij een tag v* komt de Windows-app als download bij een nieuwe release.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: pakketten installeren
+        run: pip install -e .
+
+      - name: alles compileert
+        run: python -m compileall -q drops_makker
+
+      - name: tests
+        run: python -m unittest discover -s tests -v
+
+  docker:
+    needs: test
+    strategy:
+      matrix:
+        # Een Raspberry Pi is arm64; die runner draait daar zelf op.
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: image bouwen
+        run: docker build -t drops-makker .
+
+      - name: browser start en speelt H.264
+        run: docker run --rm --shm-size=1g -e DATA_DIR=/tmp/d drops-makker drops-makker --zelftest
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: pakketten installeren
+        run: pip install .[tray] -r packaging/requirements-windows.txt
+
+      - name: icoon maken
+        run: python -c "from drops_makker.icoon import icoon_maken; icoon_maken(256).save('packaging/drops-makker.ico', sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (256, 256)])"
+
+      - name: exe bouwen
+        run: pyinstaller --onefile --noconsole --name drops-makker --icon packaging/drops-makker.ico --collect-submodules drops_makker --hidden-import pystray._win32 packaging/drops-makker.py
+
+      - name: browser start en speelt H.264
+        shell: pwsh
+        run: |
+          $env:DATA_DIR = "$env:RUNNER_TEMP\dm"
+          $p = Start-Process -FilePath dist\drops-makker.exe -ArgumentList "--zelftest" -Wait -PassThru
+          Get-Content "$env:DATA_DIR\drops-makker.log"
+          exit $p.ExitCode
+
+      - name: release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create ${{ github.ref_name }} dist/drops-makker.exe --title "drops-makker ${{ github.ref_name }}" --generate-notes
