@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
 # ook voor arm64, dus deze image werkt ook op een Raspberry Pi. Xvfb is het
 # virtuele scherm: een gewone browser lijkt het meest op echt kijken.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends chromium xvfb fonts-liberation tzdata \
+ && apt-get install -y --no-install-recommends chromium xvfb fonts-liberation tzdata libatomic1 \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

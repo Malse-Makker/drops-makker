@@ -1,0 +1,136 @@
+# Dependabot-PR's vanzelf mergen, en daarna uitrollen.
+#
+# De keuze is bewust: een lek dat openstaat is erger dan een update die iets
+# breekt. Breekt er iets, dan komt er een rode melding in #git-updates en
+# wordt het daarna met de hand opgelost. Wat er niet gebeurt is een update die
+# dagen ligt te wachten tot iemand op "merge" drukt.
+#
+# Waarom het er zo uitziet:
+#
+#   * Rechten via 'permissions'. Een workflow die Dependabot start krijgt
+#     standaard een alleen-lezen token; met 'permissions' mag hij mergen.
+#     Er wordt hier bewust géén code uit de PR uitgecheckt of uitgevoerd:
+#     pull_request_target draait met de rechten van main.
+#
+#   * Geheimen. Een door Dependabot gestarte workflow ziet alleen de
+#     Dependabot-geheimen, niet de gewone. MATTERMOST_WEBHOOK staat daarom op
+#     beide plekken.
+#
+#   * Zelf wachten op de andere controles. Op het gratis abonnement kan GitHub
+#     bij een privé-repo niet zelf afdwingen dat tests eerst groen zijn, dus
+#     wacht deze job tot alles klaar is en merget alleen als niets faalde.
+#
+#   * De uitrol met de hand starten. Een merge met GITHUB_TOKEN start zelf
+#     geen andere workflows (zo voorkomt GitHub eindeloze kettingen), dus
+#     deploy.yml zou na een automatische merge nooit draaien. Een
+#     workflow_dispatch mag wel.
+name: Dependabot samenvoegen
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+  # Om de andere controles te kunnen lezen. Zonder deze twee gaf `gh pr checks`
+  # niets terug, wachtte de job twintig minuten en mergede hij nooit
+  # (26 oktober 2026, alle 22 PR's bleven open staan).
+  checks: read
+  statuses: read
+
+jobs:
+  samenvoegen:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+      TITEL: ${{ github.event.pull_request.title }}
+      WEBHOOK: ${{ secrets.MATTERMOST_WEBHOOK }}
+      RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Wachten op de andere controles
+        run: |
+          # Eerst een minuut niets. Direct na het openen van de PR hebben de
+          # andere workflows zich soms nog niet aangemeld; dan zag deze job
+          # "geen controles" en mergede hij voordat de tests waren begonnen.
+          sleep 60
+          # Deze job staat zelf ook in de lijst; die telt niet mee, anders
+          # wacht hij op zichzelf.
+          for i in $(seq 1 60); do
+            # gh geeft een foutcode zolang er iets loopt, dus || true; of het
+            # antwoord bruikbaar is blijkt uit de JSON. Een fout wordt getoond
+            # in plaats van stil als "niets te wachten" gelezen.
+            uit=$(gh pr checks "$PR" -R "$REPO" --json name,bucket 2>&1) || true
+            if ! echo "$uit" | jq -e 'type == "array"' >/dev/null 2>&1; then
+              if echo "$uit" | grep -q "no checks reported"; then
+                uit='[]'
+              else
+                echo "gh pr checks gaf geen lijst: $uit"
+                sleep 20
+                continue
+              fi
+            fi
+            rest=$(echo "$uit" | jq '[.[] | select(.name != "samenvoegen")]')
+            fout=$(echo "$rest" | jq '[.[] | select(.bucket=="fail" or .bucket=="cancel")] | length')
+            open=$(echo "$rest" | jq '[.[] | select(.bucket=="pending")] | length')
+            if [ "$fout" -gt 0 ]; then
+              echo "Een controle faalde; niet mergen."
+              echo "$rest" | jq -r '.[] | select(.bucket=="fail" or .bucket=="cancel") | "  - \(.name)"'
+              exit 1
+            fi
+            [ "$open" -eq 0 ] && exit 0
+            sleep 20
+          done
+          echo "De controles waren na twintig minuten nog niet klaar."
+          exit 1
+
+      - name: Samenvoegen
+        id: samenvoegen
+        run: |
+          # Meerdere updates in dezelfde repo tegelijk botsen: de eerste merget,
+          # de rest ziet "base branch was modified" of een conflict in
+          # requirements.txt. Dat is geen fout en geeft geen rode melding
+          # (31 oktober 2026 kwamen er zo een handvol onterecht binnen).
+          for i in 1 2 3 4 5; do
+            if uit=$(gh pr merge "$PR" -R "$REPO" --squash --delete-branch 2>&1); then
+              echo "gemerged=ja" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "$uit"
+            case "$uit" in
+              *"merge conflicts"*|*"not mergeable"*)
+                # Dependabot bouwt de PR opnieuw op (dat doet hij bij een
+                # conflict ook uit zichzelf); dat start deze workflow weer.
+                gh pr comment "$PR" -R "$REPO" --body "@dependabot rebase" || true
+                echo "Conflict met een update die eerder was; Dependabot bouwt opnieuw op."
+                echo "gemerged=nee" >> "$GITHUB_OUTPUT"
+                exit 0 ;;
+              *"Base branch was modified"*)
+                sleep $((RANDOM % 20 + 10)) ;;
+              *)
+                exit 1 ;;
+            esac
+          done
+          exit 1
+
+      - name: Uitrollen
+        if: steps.samenvoegen.outputs.gemerged == 'ja'
+        run: |
+          if gh workflow view deploy.yml -R "$REPO" >/dev/null 2>&1; then
+            gh workflow run deploy.yml -R "$REPO" --ref main
+            echo "Uitrol gestart; die meldt zelf in #git-updates of het lukte."
+          else
+            echo "Geen deploy.yml in deze repo; er valt niets uit te rollen."
+          fi
+
+      - name: Melden dat het misging
+        if: failure() && env.WEBHOOK != ''
+        run: |
+          tekst=$(jq -n --arg r "$REPO" --arg p "$PR" --arg t "$TITEL" --arg u "$RUN" \
+            '"#### :red_circle: Dependabot-update niet gemerged: \($r)\n**#\($p)** \($t)\nDe controles faalden of de merge lukte niet; de PR staat nog open. [Wat er misging](\($u))"')
+          curl -sS -X POST -H 'Content-Type: application/json' \
+               -d "$(jq -n --arg t "$tekst" '{text: $t}')" "$WEBHOOK"
