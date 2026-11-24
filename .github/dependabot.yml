@@ -1,11 +1,11 @@
-# Dependabot opent elke maandag PR's voor nieuwe versies van de afhankelijkheden.
+# Dependabot opent elke dag PR's voor nieuwe versies. dependabot-samenvoegen.yml
+# merget ze vanzelf als de controles groen zijn; anders een melding in #git-updates.
 version: 2
 updates:
   - package-ecosystem: pip
     directories: ["/", "/packaging"]
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
       time: "06:00"
       timezone: Europe/Amsterdam
     open-pull-requests-limit: 5
@@ -17,8 +17,7 @@ updates:
   - package-ecosystem: docker
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
       time: "06:00"
       timezone: Europe/Amsterdam
     open-pull-requests-limit: 5
@@ -26,8 +25,7 @@ updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
       time: "06:00"
       timezone: Europe/Amsterdam
     open-pull-requests-limit: 5
